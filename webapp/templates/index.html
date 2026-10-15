@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 追色</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
+    --line: #e2e2dd; --accent: #d9622b; --accent-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --panel: #212120; --text: #ececea; --muted: #9a9a94;
+            --line: #33332f; --accent: #ef7a43; --accent-text: #161615; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+  main { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px; min-height: 100vh; }
+  aside { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  h1 { font-size: 18px; margin: 0; }
+  .drop { position: relative; border: 1.5px dashed var(--line); border-radius: 8px; height: 140px;
+          display: grid; place-items: center; color: var(--muted); cursor: pointer; overflow: hidden; }
+  .drop.over { border-color: var(--accent); }
+  .drop img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .drop span { position: relative; background: var(--panel); padding: 2px 8px; border-radius: 4px; }
+  .drop input { display: none; }
+  label.row { display: grid; grid-template-columns: 80px 1fr 36px; align-items: center; gap: 8px; }
+  label.row output { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  select, button { font: inherit; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line);
+                   background: var(--panel); color: var(--text); }
+  button.primary { background: var(--accent); color: var(--accent-text); border: none; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .buttons { display: flex; gap: 8px; }
+  .buttons button { flex: 1; cursor: pointer; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+            display: grid; place-items: center; position: relative; overflow: hidden; min-height: 60vh; }
+  section img { max-width: 100%; max-height: calc(100vh - 64px); display: block; user-select: none; }
+  #hint { color: var(--muted); }
+  #status { color: var(--muted); min-height: 1.5em; }
+  .tip { position: absolute; top: 10px; left: 10px; background: var(--panel); color: var(--muted);
+         padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  @media (max-width: 720px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <aside>
+    <h1>AI 追色</h1>
+    <label class="drop" id="dropA"><input type="file" accept="image/*,.tif,.tiff" id="fileA"><span>参考图 A（想要的色调）</span></label>
+    <label class="drop" id="dropB"><input type="file" accept="image/*,.tif,.tiff" id="fileB"><span>待调色照片 B</span></label>
+    <label class="row">算法
+      <select id="method" style="grid-column: span 2">
+        <option value="ot">分布匹配（推荐）</option>
+        <option value="mkl">协方差线性</option>
+        <option value="reinhard">均值/方差（最温和）</option>
+      </select>
+    </label>
+    <button class="primary" id="go" disabled>开始追色</button>
+    <label class="row">整体强度<input type="range" id="amount" min="0" max="100" value="100"><output>100</output></label>
+    <label class="row">影调<input type="range" id="tone" min="0" max="100" value="100"><output>100</output></label>
+    <label class="row">色彩<input type="range" id="color" min="0" max="100" value="100"><output>100</output></label>
+    <label class="row">肤色保护<input type="range" id="skin" min="0" max="100" value="0"><output>0</output></label>
+    <label class="row">导出格式
+      <select id="format" style="grid-column: span 2">
+        <option value="tif">TIFF 16 位（无损）</option>
+        <option value="png">PNG 8 位（无损）</option>
+        <option value="jpg">JPG（最高质量）</option>
+      </select>
+    </label>
+    <div class="buttons">
+      <button id="dl" disabled>下载原图</button>
+      <button id="cube" disabled>导出 .cube</button>
+    </div>
+    <div id="status"></div>
+  </aside>
+  <section id="stage">
+    <div id="hint">上传参考图 A 和照片 B 后点击「开始追色」</div>
+    <img id="result" hidden alt="追色结果">
+    <div class="tip" id="tip" hidden>按住图片查看原图</div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const files = {};
+let token = null, timer = null;
+
+function bindDrop(drop, input, key) {
+  const set = f => {
+    if (!f) return;
+    files[key] = f;
+    let img = drop.querySelector('img');
+    if (!img) { img = document.createElement('img'); drop.prepend(img); }
+    img.hidden = false;
+    img.onerror = () => { img.hidden = true; };  // e.g. TIFF: browser can't preview it
+    img.src = URL.createObjectURL(f);
+    drop.querySelector('span').textContent = f.name;
+    $('go').disabled = !(files.A && files.B);
+  };
+  input.addEventListener('change', () => set(input.files[0]));
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); set(e.dataTransfer.files[0]); });
+}
+bindDrop($('dropA'), $('fileA'), 'A');
+bindDrop($('dropB'), $('fileB'), 'B');
+
+const params = () => new URLSearchParams(
+  ['amount', 'tone', 'color', 'skin'].map(k => [k, $(k).value / 100]));
+
+function refresh() {
+  if (!token) return;
+  $('result').src = `/api/preview/${token}?${params()}`;
+}
+
+for (const k of ['amount', 'tone', 'color', 'skin']) {
+  $(k).addEventListener('input', () => {
+    $(k).nextElementSibling.value = $(k).value;
+    clearTimeout(timer); timer = setTimeout(refresh, 120);
+  });
+}
+
+$('go').addEventListener('click', async () => {
+  const fd = new FormData();
+  fd.append('reference', files.A); fd.append('target', files.B); fd.append('method', $('method').value);
+  $('go').disabled = true; $('status').textContent = '分析中…';
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/api/match', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(await r.text());
+    token = (await r.json()).token;
+    $('hint').hidden = true; $('result').hidden = false; $('tip').hidden = false;
+    $('dl').disabled = $('cube').disabled = false;
+    refresh();
+    $('status').textContent = `完成，用时 ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+  } catch (e) {
+    $('status').textContent = '失败：' + e.message.slice(0, 200);
+  } finally {
+    $('go').disabled = false;
+  }
+});
+
+const img = $('result');
+const showOriginal = on => { if (token) img.src = on ? `/api/original/${token}` : `/api/preview/${token}?${params()}`; };
+img.addEventListener('pointerdown', () => showOriginal(true));
+img.addEventListener('pointerup', () => showOriginal(false));
+img.addEventListener('pointerleave', e => { if (e.buttons) showOriginal(false); });
+
+$('dl').addEventListener('click', () => {
+  const q = params(); q.set('format', $('format').value);
+  location.href = `/api/download/${token}?${q}`;
+});
+$('cube').addEventListener('click', () => { location.href = `/api/cube/${token}?${params()}`; });
+</script>
+</body>
+</html>
